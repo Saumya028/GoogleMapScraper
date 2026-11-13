@@ -18,6 +18,7 @@ import sys
 import time
 import random
 import socket
+import re
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -32,6 +33,8 @@ from selenium.common.exceptions import (
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import pandas as pd
+
+from enrich import best_contact, enrich_from_website
 
 
 # ---------------------------------------------------------------------------
@@ -158,11 +161,39 @@ def collect_links(driver, url):
 # Phase 2 — Extract business details
 # ---------------------------------------------------------------------------
 
-def extract_details(driver, link):
-    """Visit a single place link and extract business information.
+COLUMNS = [
+    "name", "category", "rating", "reviews", "price_level",
+    "address", "plus_code", "latitude", "longitude",
+    "phone", "website_phones", "whatsapp", "website",
+    "shop_email", "owner_email", "other_emails",
+    "owner_name", "owner_title",
+    "open_status", "hours", "schedule",
+    "facebook", "instagram", "twitter", "linkedin", "youtube", "tiktok",
+    "google_maps_url", "place_id", "best_contact",
+]
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
-    Returns a dict with keys: name, address, website, phone, schedule.
-    Returns an empty dict on failure.
+
+def _parse_hours(soup):
+    """Return the weekly opening hours as 'Monday 9 AM-5 PM | Tuesday ...'."""
+    rows = []
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 2:
+            continue
+        day = cells[0].get_text(" ", strip=True)
+        if day.lower() not in DAYS:
+            continue
+        times = " ".join(cells[1].get_text(" ", strip=True).split())
+        times = times.replace("\u202f", " ").replace("\u2009", " ")
+        rows.append(f"{day} {times}")
+    return " | ".join(rows) or None
+
+
+def extract_details(driver, link):
+    """Visit a single place link and extract business information from Google Maps.
+
+    Returns a dict (see COLUMNS) or an empty dict on failure.
     """
     driver.get(link + "&hl=en")
 
@@ -175,50 +206,83 @@ def extract_details(driver, link):
         return {}
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
+    data = dict.fromkeys(COLUMNS)
+    data["google_maps_url"] = link
 
-    data = {
-        "name": None,
-        "address": None,
-        "website": None,
-        "phone": None,
-        "schedule": None,
-    }
-
-    # Business name
     h1 = soup.find("h1")
     if h1:
         data["name"] = h1.get_text(strip=True)
 
-    # Information panel
-    for div in soup.find_all("div", attrs={"aria-label": True}):
-        label = div["aria-label"]
+    # --- Core info rows (data-item-id is far more stable than CSS classes)
+    btn = soup.find(attrs={"data-item-id": "address"})
+    if btn:
+        data["address"] = btn.get_text(strip=True)
 
-        if "Information for" in label:
-            # Address
-            btn = div.find("button", attrs={"data-item-id": "address"})
-            if btn:
-                data["address"] = btn.get_text(strip=True)
+    a_tag = soup.find("a", attrs={"data-item-id": "authority"})
+    if a_tag and a_tag.get("href"):
+        data["website"] = a_tag["href"]
 
-            # Website
-            a_tag = div.find("a", attrs={"data-item-id": "authority"})
-            if a_tag and a_tag.get("href"):
-                data["website"] = a_tag["href"]
+    phone_el = soup.find(attrs={"data-item-id": re.compile(r"^phone:tel:")})
+    if phone_el:
+        data["phone"] = phone_el["data-item-id"].split("tel:", 1)[1] or phone_el.get_text(strip=True)
 
-            # Phone
-            for button in div.find_all("button", attrs={"aria-label": True}):
-                if "Phone" in button["aria-label"]:
-                    data["phone"] = button.get_text(strip=True)
-                    break
+    plus = soup.find(attrs={"data-item-id": "oloc"})
+    if plus:
+        data["plus_code"] = plus.get_text(strip=True)
 
-        elif "opening hours" in label.lower() or "open hours" in label.lower():
+    # --- Category
+    cat = soup.find("button", attrs={"jsaction": re.compile("category")})
+    if cat:
+        data["category"] = cat.get_text(strip=True)
+
+    # --- Rating / reviews / price
+    for el in soup.find_all(attrs={"aria-label": True}):
+        label = el["aria-label"]
+        m = re.match(r"^\s*([\d.,]+)\s+stars?", label)
+        if m and not data["rating"]:
+            data["rating"] = m.group(1).replace(",", ".")
+        m = re.match(r"^\s*([\d,\.]+)\s+reviews?", label)
+        if m and not data["reviews"]:
+            data["reviews"] = re.sub(r"\D", "", m.group(1))
+        if label.startswith("Price:") and not data["price_level"]:
+            data["price_level"] = label.split(":", 1)[1].strip()
+
+    # --- Opening hours
+    data["hours"] = _parse_hours(soup)
+    for el in soup.find_all(attrs={"aria-label": True}):
+        label = el["aria-label"]
+        if "opening hours" in label.lower() or "open hours" in label.lower():
             parts = label.split(".")
-            if parts and len(parts[0]) > 0:
+            if parts and parts[0]:
                 data["schedule"] = parts[0].replace(",", " -> ")
+                break
+    status = soup.find(string=re.compile(r"^\s*(Open|Closed|Opens|Closes|Temporarily closed|Permanently closed)\b"))
+    if status:
+        data["open_status"] = " ".join(status.split())
+
+    # --- Coordinates and place id come from the URL
+    url = driver.current_url
+    m = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", url) or re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", url)
+    if m:
+        data["latitude"], data["longitude"] = m.group(1), m.group(2)
+    m = re.search(r"!1s(0x[0-9a-f]+:0x[0-9a-f]+)", link + url)
+    if m:
+        data["place_id"] = m.group(1)
 
     return data
 
 
-def scrape_details(driver, links, output_path):
+def _render(driver, url):
+    """Load a page in the browser (for JavaScript-built sites) and return its HTML."""
+    try:
+        driver.get(url)
+        time.sleep(2.5)
+        return driver.page_source
+    except WebDriverException:
+        return None
+
+
+def scrape_details(driver, links, output_path, find_extra=True):
     """Iterate through all links, extract details, and save to CSV.
 
     Progress is saved after each extraction (crash-safe).
@@ -232,8 +296,15 @@ def scrape_details(driver, links, output_path):
         try:
             data = extract_details(driver, link)
             if data and data.get("name"):
+                if find_extra and data.get("website"):
+                    data.update({k: v for k, v in enrich_from_website(data["website"], render=lambda u: _render(driver, u)).items() if v})
+                data["best_contact"] = best_contact(data)
                 results.append(data)
-                log.info(f"    -> {data['name']}")
+                log.info(
+                    f"    -> {data['name']}  |  phone: {data.get('phone') or '-'}"
+                    f"  |  email: {data.get('shop_email') or data.get('owner_email') or '-'}"
+                    f"  |  owner: {data.get('owner_name') or '-'}"
+                )
             else:
                 log.warning("    -> No data extracted")
         except WebDriverException as exc:
@@ -241,8 +312,8 @@ def scrape_details(driver, links, output_path):
 
         # Save progress after each extraction (crash-safe)
         if results:
-            df = pd.DataFrame(results)
-            df.to_csv(output_path, index=False, encoding="utf-8")
+            df = pd.DataFrame(results).reindex(columns=COLUMNS)
+            df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
         random_delay()
 
@@ -297,6 +368,11 @@ def parse_args():
         "--from-links",
         metavar="CSV",
         help="Skip link collection and extract details from an existing links CSV.",
+    )
+    parser.add_argument(
+        "--no-website",
+        action="store_true",
+        help="Skip visiting business websites for emails / owner / socials (faster).",
     )
     return parser.parse_args()
 
@@ -355,7 +431,7 @@ def main():
         # Phase 2 — Extract details
         if not args.links_only:
             details_csv = f"{args.output}_details.csv"
-            scrape_details(driver, links, details_csv)
+            scrape_details(driver, links, details_csv, find_extra=not args.no_website)
 
     except KeyboardInterrupt:
         log.info("\nInterrupted by user. Progress has been saved.")

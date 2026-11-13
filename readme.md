@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Extract business data from Google Maps — names, addresses, phone numbers, websites and hours in one command.</strong>
+  <strong>Extract business data from Google Maps — names, addresses, phone numbers, websites, emails and hours in one command.</strong>
 </p>
 
 <p align="center">
@@ -115,6 +115,7 @@ python main.py --help
 | `--headless` | Run Chrome without visible browser window | Off |
 | `--links-only` | Only collect links, skip detail extraction | Off |
 | `--from-links CSV` | Skip link collection, extract from existing CSV | None |
+| `--no-website` | Skip visiting business websites (emails, owner, socials) — faster | Off |
 
 #### Examples
 
@@ -157,13 +158,42 @@ python main.py --from-links gyms_links.csv -o gyms
 
 ## Data Extracted
 
+**From the Google Maps listing**
+
 | Field | Description |
 |-------|-------------|
-| **Name** | Business name |
-| **Address** | Full street address |
-| **Phone** | Phone number |
-| **Website** | Business website URL |
-| **Schedule** | Opening hours |
+| `name`, `category` | Business name and type |
+| `rating`, `reviews`, `price_level` | Rating, review count, price level |
+| `address`, `plus_code`, `latitude`, `longitude` | Location |
+| `phone` | Phone number on the listing |
+| `website` | Business website |
+| `open_status`, `hours`, `schedule` | Open/closed now and the full weekly hours |
+| `google_maps_url`, `place_id` | Link and Google's ID for the place |
+
+**From the business's own website** (homepage + contact / about / team pages)
+
+| Field | Description |
+|-------|-------------|
+| `shop_email` | Shop mailbox (info@, contact@, bookings@ ...) |
+| `owner_email` | Email matching a found owner/founder name (blank if not clear) |
+| `other_emails` | Any other published addresses |
+| `owner_name`, `owner_title` | Owner / founder / manager named on the site |
+| `website_phones`, `whatsapp` | Extra phone and WhatsApp numbers |
+| `facebook`, `instagram`, `twitter`, `linkedin`, `youtube`, `tiktok` | The shop's own social profiles |
+
+Owner and email fields are filled only when the business publishes them; many shops don't, so blanks are normal.
+Use `--no-website` to skip the website step.
+
+`best_contact` shows the best way to reach each business: email, else WhatsApp, else phone.
+
+### Re-run the email step on an existing CSV
+
+```bash
+python add_emails.py my_results_details.csv -o my_results_emails.csv
+python add_emails.py my_results_details.csv --render     # also uses Chrome for JavaScript-built sites
+```
+
+No Google Maps re-scrape needed. It also decodes Cloudflare-hidden emails and tries /contact, /about etc. when the site doesn't link them.
 
 ---
 
@@ -185,6 +215,8 @@ You can adjust these constants at the top of `main.py`:
 ```
 GoogleMapScraper/
 ├── main.py              # Main scraper script
+├── add_emails.py        # Re-run the email step on an existing CSV
+├── enrich.py            # Website enrichment (emails, owner, phones, socials)
 ├── requirements.txt     # Python dependencies
 ├── assets/
 │   └── banner.svg       # Project banner
