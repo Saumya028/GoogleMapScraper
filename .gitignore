@@ -36,3 +36,5 @@ Thumbs.db
 
 # Chrome driver cache
 .wdm/
+
+*.json

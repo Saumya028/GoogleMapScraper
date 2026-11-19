@@ -132,6 +132,63 @@ python main.py --from-links gyms_links.csv -o gyms
 
 ---
 
+## Cover a whole city (area search)
+
+Google Maps shows at most ~120 places per search. `--area` splits the city into map tiles, searches every
+tile, and automatically splits crowded tiles into smaller ones, so you only type the city name:
+
+```bash
+python main.py -q "grocery store" --area "Mumbai" -o mumbai --headless
+
+# several shop types in one run (repeat -q); results are merged and de-duplicated
+python main.py -q "grocery store" -q "pharmacy" -q "kirana store" --area "Mumbai" -o mumbai --headless
+```
+
+- Put the shop type in `-q` and the place in `--area` (don't write "Mumbai" inside `-q`).
+- Only places **inside the area's real boundary** (from OpenStreetMap) are collected, so neighbouring towns
+  (e.g. Navi Mumbai, Thane) are left out and tiles outside the boundary are skipped. The log shows which boundary was
+  used; if it says OpenStreetMap only has a *point*, use a more specific name or `--bbox`.
+- Boundary not found or wrong? Draw your own at https://geojson.io, save it, and use `--polygon-file mumbai.geojson`.
+- Every searched tile is logged to `<output>_tiles.csv` (results, places inside the tile, whether the list was cut short).
+- Works for any city, district or state OpenStreetMap knows: `--area "Pune"`, `--area "Thane district"`.
+- Many cities in one run: `--areas-file cities.txt` (one name per line).
+- Your own region: `--bbox 18.89,72.77,19.27,72.99` (south,west,north,east).
+- Interrupted? Run the same command again — it resumes from the last tile.
+- Collect links first, scrape details later: add `--links-only`, then `--from-links mumbai_links.csv`.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--cell-km` | 3 | Starting tile size in km |
+| `--split-threshold` | 25 | A tile with this many places *inside it* is split into 4 (Google pads results with places from outside the tile, so only places inside count) |
+| `--max-depth` | 3 | Max splits per tile (3 -> ~600 m tiles) |
+
+---
+
+## How complete is my result? (recall check)
+
+```bash
+python main.py -q "stationery store" --area "Vile Parle" --links-only -o check_vp
+python compare_links.py check_vp_links.csv mumbai_links.csv
+```
+
+Prints the share of a small, thoroughly searched neighbourhood that your big run also found. Try 2-3 neighbourhoods.
+Different wordings find different places, so combine terms: `-q "stationery store" -q "stationary shop"` (many shops spell it "stationary").
+
+---
+
+## Stopped or crashed? Just continue
+
+Both steps resume. Re-run the **same command** (or skip the slow link search with `--from-links`):
+
+```bash
+python main.py --from-links mumbai_links.csv -o mumbai --headless
+```
+
+Places already in `mumbai_details.csv` are skipped. If Chrome dies mid-run, a new one is started automatically,
+and the run stops after 5 failures in a row instead of burning through the list. `--fresh` starts the details step over.
+
+---
+
 ## How It Works
 
 ```
@@ -216,6 +273,8 @@ You can adjust these constants at the top of `main.py`:
 GoogleMapScraper/
 ├── main.py              # Main scraper script
 ├── add_emails.py        # Re-run the email step on an existing CSV
+├── compare_links.py     # Recall check against a small neighbourhood
+├── grid.py              # Area tiling (geocoding + map tiles)
 ├── enrich.py            # Website enrichment (emails, owner, phones, socials)
 ├── requirements.txt     # Python dependencies
 ├── assets/
